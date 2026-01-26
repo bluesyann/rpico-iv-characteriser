@@ -1,0 +1,37 @@
+name: test
+component: 1k resistor
+
+carac 1:
+    comment: Small step
+    datafile: small_step.dat
+    setup:
+        voffset: 0
+        sampling: 100
+    init:
+        ch1:
+            v: 0
+        ch2:
+            v: 0
+        ch3:
+            v: 0
+    sweep:
+        channel:
+            ch1: i
+        start: 0
+        stop: 100
+        step: 10
+        timestep: 2
+    plot 1:
+        name: Resistance 1 kOhm
+        file: plot1.png
+        x: i1
+        xlabel: Current (mA)
+        y: v1
+        ylabel: Voltage (V)
+    plot 2:
+        name: Resistance 1 kOhm
+        file: plot2.png
+        x: t
+        xlabel: Time (s)
+        y: i1
+        ylabel: Current (mA)

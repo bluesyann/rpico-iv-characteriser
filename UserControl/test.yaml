@@ -1,0 +1,69 @@
+name: test
+component: 1k resistor
+
+carac 1:
+    comment: Small step
+    datafile: small_step.dat
+    timestep: 1
+    sampling: 10
+    voffset: 0
+    init:
+        ch1:
+            v: 0
+        ch2:
+            v: 0
+        ch3:
+            i: 10
+    sweep:
+        channel:
+            ch1: v
+        start: 0
+        stop: 4
+        step: 1
+        sweep:
+            channel:
+                ch2: v
+            start: 2.5
+            stop: 6
+            step: 0.5
+    plot 1:
+        name: Resistance 1 kOhm
+        file: plot1.png
+        x: v1
+        xlabel: Voltage (V)
+        y: i1
+        ylabel: Current (mA)
+    plot 2:
+        name: Réponse temporelle
+        x: v1
+        xlabel: Voltage (V)
+        y: t
+        ylabel: Time (s)
+
+carac 2:
+    comment: Big step
+    timestep: 1
+    sampling: 10
+    init:
+        ch1:
+            v: 0
+        ch2:
+            v: 0
+        ch3:
+            i: 10
+    sweep:
+        channel:
+            ch1: v
+        values: 0 1 1.5 1.7 2 4
+    plot 1:
+        name: Resistance 1 kOhm
+        x: v1
+        xlabel: Voltage (V)
+        y: i1
+        ylabel: Current (mA)
+    plot 2:
+        name: Réponse temporelle
+        x: v1
+        xlabel: Voltage (V)
+        y: t
+        ylabel: Time (s)
