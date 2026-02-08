@@ -141,7 +141,7 @@ async def read_serial_values(ser: serial.Serial, rows: list) -> dict:
     Docstring for get_values
     """
     # timestamp for the beggining of the reading
-    start= asyncio.get_event_loop().time()
+    start= -1
     while True:
         if ser.in_waiting > 0:
             line = ser.readline().decode('utf-8').strip()
@@ -149,9 +149,15 @@ async def read_serial_values(ser: serial.Serial, rows: list) -> dict:
             
             # Parse the line into a dataframe
             try:
-                _, i1, v1, _, i2, v2, _, i3, v3 = line.split(' ')
+                t, _, i1, v1, _, i2, v2, _, i3, v3 = line.split(' ')
+                
+                # Set the start time based on the first timestamp received
+                if start < 0:
+                    start= float(t)
+                t= float(t) - start
+
                 rows.append({
-                    't': asyncio.get_event_loop().time() - start,
+                    't': float(t),
                     'i1': float(i1),
                     'v1': float(v1),
                     'i2': float(i2),
@@ -189,7 +195,7 @@ async def plot_values(rows: list, set: dict):
 
 async def main():
 
-    file= Path('/home/yann/Bureau/Electronique/Caracterieur_run/current_gen.yaml')
+    file= Path('current_gen.yaml')
     dir= file.parents[0]
     config = read_yaml( Path(file).resolve() )
 
@@ -202,9 +208,12 @@ async def main():
         # Setting up the pico to the sampling rate and time step
         ser= serial.Serial(PERIPHERAL, PERIPHERAL_BAUDRATE)
         initialize_channels(config[c], ser)
-        rows= []
+
+        # Purge the serial buffer before starting the sweep
+        ser.reset_input_buffer()
 
         # Define async tasks for reading serial values and running sweeps
+        rows= []
         task_list=[]
         task_list.append(asyncio.create_task(read_serial_values(ser, rows)))
         task_list.append(asyncio.create_task(run_sweep(config[c], ser)))

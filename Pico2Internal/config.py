@@ -2,7 +2,7 @@
 Constants and Pin definitions
 """
 
-REGULATOR_SLEEP_TIME = 0.0001  # Time in seconds between regulator updates
+REGULATOR_SLEEP_TIME = 1  # Time in milliseconds between regulator updates
 
 # Fisrt INA3221 wiring
 INA_A_SDA_PIN = 2

@@ -17,9 +17,7 @@ carac 1:
     sweep:
         channel:
             ch1: v
-        start: 0
-        stop: 10
-        step: 1
+        values: 0 2 4 6 4 2 0
         timestep: 2
     plot 1:
         name: Resistance 1 kOhm
