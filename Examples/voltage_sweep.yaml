@@ -1,0 +1,42 @@
+name: test
+comment: 1k resistor
+
+caracs:
+  - name: Small step
+    datafile: test/calib_i1-i2-i3_R100k_range4.dat
+    init:
+        range: 2
+        voffset: 0
+        sampling: 10
+        channels:
+          - name: a
+            control: v
+          - name: b
+            control: nc
+          - name: c
+            control: nc
+    sweep:
+        channel: a
+        start: 0
+        stop: 5
+        step: 1
+        timestep: 1
+        sweep:
+            channel: b
+            start: 0
+            stop: 5
+            step: 1
+            timestep: 1
+    plots:
+      - name: Voltage vs. time
+        file: test/calib_i1-i2-i3_R100k_range4_voltage.png
+        x: t
+        xlabel: Time (s)
+        y: va
+        ylabel: Voltage (V)
+      - name: Currents with no load
+        file: test/calib_i1-i2-i3_R100k_range4_currents.png
+        x: va
+        xlabel: Voltage (V)
+        y: [ia,ib,ic]
+        ylabel: Currents (mA)

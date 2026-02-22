@@ -1,0 +1,146 @@
+# schema.yml
+$schema: "http://json-schema.org/draft-07/schema#"
+type: object
+required: [comment, caracs]
+properties:
+  name:
+    type: string
+    minLength: 1
+  comment:
+    type: string
+    minLength: 1
+  calibration folder:
+    type: string
+    minLength: 1
+  caracs:
+    type: array
+    minItems: 1
+    items:
+      type: object
+      required: [name, init]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        datafile:
+          type: string
+          minLength: 1
+          pattern: '^[a-zA-Z0-9_/.-]+$'
+        init:
+          type: object
+          required: [range, voffset, sampling, channels]
+          properties:
+            range:
+              type: integer
+              minimum: 0
+              maximum: 4
+            voffset:
+              type: number
+              minimum: -10
+              maximum: 10
+            sampling:
+              type: integer
+              minimum: 1
+              maximum: 1000
+            channels:
+              type: array
+              minItems: 3
+              maxItems: 3
+              items:
+                type: object
+                required: [name, control]
+                properties:
+                  name:
+                    type: string
+                    pattern: "^[a-zA-Z0-9]+$"
+                  control:
+                    type: string
+                    enum: [v, i, nc]
+                  initvalue:
+                    type: number
+                    minimum: -1000
+                    maximum: 1000
+        static:
+          type: object
+          required: [duration]
+          properties:
+            duration:
+              tpye: number
+              minimum: 0
+              maximum: 1000000
+        sweep:
+          type: object
+          required: [channel, timestep]
+          properties:
+            channel:
+              type: string
+              enum: [a, b, c]
+            start:
+              type: number
+              minimum: -1000
+              maximum: 1000
+            stop:
+              type: number
+              minimum: -1000
+              maximum: 1000
+            step:
+              type: number
+              minimum: 0.001
+              maximum: 100
+            values:
+              type: array
+              minItems: 1
+              items:
+                type: number
+            timestep:
+              type: number
+              minimum: 0.01
+              maximum: 60
+            # OPTIONAL nested sweep (recursive)
+            sweep:
+              $ref: '#/definitions/sweep'
+          oneOf:
+            - required: [start, stop, step]  # Classic linspace
+            - required: [values]             # Explicit values  
+          additionalProperties: false
+        plots:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [name, x, y, xlabel, ylabel]
+            properties:
+              name:
+                type: string
+                minLength: 1
+              file:
+                type: string
+                minLength: 1
+                pattern: '^[a-zA-Z0-9_/\.\-]+\.(png|pdf|svg)$'
+              x:
+                type: string
+                enum: [t, va, vb, vc, ia, ib, ic]
+              xlabel:
+                type: string
+                minLength: 1
+              y:
+                oneOf:
+                  - type: string
+                    enum: [va, vb, vc, ia, ib, ic]
+                  - type: array
+                    items:
+                      type: string
+                      enum: [ia, ib, ic, va, vb, vc]
+                    minItems: 1
+              ylabel:
+                type: string
+                minLength: 1
+      oneOf:
+        - required: [static] # static mode
+        - required: [sweep] # sweep mode
+      additionalProperties: false
+additionalProperties: false
+
+definitions:
+  sweep:
+    $ref: '#/properties/caracs/items/properties/sweep'  # Self-reference to the sweep definition inside caracs

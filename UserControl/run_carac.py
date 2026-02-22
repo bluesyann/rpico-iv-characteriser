@@ -1,13 +1,40 @@
 from pathlib import Path
 import yaml
+from jsonschema import validate, ValidationError
 import pandas as pd
-import serial
 import asyncio
-from time import sleep
-import matplotlib.pyplot as plt
-from pathlib import Path
 
+import matplotlib.pyplot as plt
 plt.ion()  # Enable interactive mode
+
+import os
+def is_valid_file(parser, arg):
+    if not os.path.isfile(arg):
+        parser.error(f"The file {arg} does not exist!")
+    else:
+        return Path(arg)
+
+
+import argparse
+parser = argparse.ArgumentParser(description='Run voltage sweeps or monitor the multichannel Voltage/Current sensing inteface.')
+parser.add_argument('file', type=lambda x: is_valid_file(parser, x), help='YAML file describing the process.')
+parser.add_argument('-device', type=str, default='/dev/ttyACM0', help='Path to the Raspberry Pico device.')
+parser.add_argument('-baud', type=int, default=115200, help='Baud rate for serial communication.')
+parser.add_argument('-d', '--debug', action='store_true', help='Activate debug logging.')
+args = parser.parse_args()
+
+import logging
+level = logging.DEBUG if args.debug else logging.INFO
+logging.basicConfig(level=level, format='%(asctime)s - %(levelname)s - %(message)s')
+# ✓ ✗ ⚠ ℹ️ ⏳ 
+#\033[91m✗\033[0m
+#\033[92m✓\033[0m
+#\t→
+#\033[93m●
+
+import serial_functions as serfn
+import calib_functions as calfn
+
 
 """Virtual environment peripheral settings
 
@@ -16,178 +43,71 @@ source venv/bin/activate
 pip install pyserial pyyaml pandas
 """
 
-PERIPHERAL= '/dev/ttyACM1'
-PERIPHERAL_BAUDRATE = 115200
+"""
+Decouple plotting: Move plotting out of the asyncio loop (separate process) so matplotlib I/O and rendering cannot interfere with sampling. The main loop should only provide data copies.
+Graceful shutdown: Handle signals (SIGINT, SIGTERM) to stop tasks/processes cleanly, flush data to CSV, and join worker processes.
+provide a requirements.txt for reproducible venvs.
+Unit tests & CI: Add tests for parsing, range_float, resample_xy, and calibration coefficient calculations. Run tests in CI to catch regressions.
+Code quality: Add type hints, small docstrings, move reusable logic into modules, and run flake8/black for consistency. Replace magic numbers (sleep intervals) with named constants.
+"""
+
 PLOT_INTERVAL = 1.0  # seconds
+
 
 def read_yaml(filepath: Path):
     config = {}
     try:
-        print(f"Parsing yaml file at: {filepath}")
+        logging.info(f"ℹ️ Parsing yaml file at: {filepath}")
         with open(filepath, 'r') as f:
             loaded = yaml.safe_load(f)
             if isinstance(loaded, dict):
                 config = loaded
     except Exception as e:
-        print(f"Error opening file: {e}")
+        logging.error(f"✗ Error opening file: {e}")
     return config
 
 
-def format_sweep_values(sweep: dict) -> None:
-    if 'value_list' not in sweep:
-        # if range and step provided, generate values
-        if 'values' not in sweep:
-            try:
-                sweep['value_list'] = range_float(sweep['start'], sweep['stop'], sweep['step'])
-            except Exception as e:
-                print(f"Error generating sweep values: {e}")
-        # if values is a string, convert to list
-        else:
-            try:
-                sweep['value_list'] = sweep['values'].split(' ')  # assuming space-separated string
-            except Exception as e:
-                print(f"Error parsing sweep values: {e}")
-
-
-def range_float(start, stop, step):
-    step=abs(step)  # ensure step is positive
-
-    reversed= False
-    if start > stop: # handle decreasing ranges
-        buf= start
-        start= stop
-        stop= buf
-        reversed= True
-
-    current = start
-    values = []
-    while current < stop+0.001:  # Adding a small tolerance to include stop value
-        values.append(current)
-        current += step
-    if reversed:
-        values= values[::-1]
-    return [round(v, 2) for v in values]
-
-
-standby={
-    'init':{
-        'ch1':
-            {'v':0},
-        'ch2':
-            {'v':0},
-        'ch3':
-            {'v':0}
-    },
-    'setup':{
-        'voffset': 0,
-        'sampling': 1
-    }
-}
-
-
-def initialize_channels(config: dict, ser: serial.Serial) -> None:
-    print("Initializing channels and time settings...")
-    if 'init' not in config:
-        return
-    for ch in config['init']:
-        key= list(config['init'][ch].keys())[0]
-        cmd=f"{ch} {key} {config['init'][ch][key]}"
-        print(f"Initializing {cmd}")
-        ser.write(f"{cmd}\n".encode('utf-8'))
-        ser.flush()
-        sleep(0.1)  # small delay to ensure command is processed
-    for param in config['setup']:
-        cmd=f"set {param} {config['setup'][param]}"
-        print(f"{cmd}")
-        ser.write(f"{cmd}\n".encode('utf-8'))
-        ser.flush()
-        sleep(0.1)  # small delay to ensure command is processed
-
-
-async def run_sweep(config: dict, ser: serial.Serial) -> bool:
-    if 'sweep' not in config:
-        return False
-    sweep=config['sweep']
-    ch= sweep['channel']
-    dt= sweep['timestep']
-    print(f"Running {ch} sweep with config: {sweep}")
+def validate_yaml(data_file: Path, schema_file: Path) -> bool:
+    # Load YAML files
+    with open(data_file) as f:
+        data = yaml.safe_load(f)
+    with open(schema_file) as f:
+        schema = yaml.safe_load(f)
     
-    # Convert range to list if needed
-    format_sweep_values(sweep)
-    print(f"Sweep values: {sweep['value_list']}")
-
-    for sp in sweep['value_list']:
-        print(f"Setting {ch} setpoint to: {sp}")
-        
-        # Prepare command to send to Pico
-        key= list(ch.keys())[0]
-        cmd=f"{key} {ch[key]} {sp}"
-        ser.write(f"{cmd}\n".encode('utf-8'))
-        ser.flush()
-
-        await asyncio.sleep(dt)
-
-        # Run another nested sweeps if defined
-        if 'sweep' in sweep:
-            await run_sweep(sweep, ser)
-    print(f"Completed sweep for channel: {ch}")
-    await asyncio.sleep(PLOT_INTERVAL) # wait a bit before finishing to update the plot
-    return True
+    try:
+        validate(instance=data, schema=schema)
+        logging.info("✓ Valid YAML!")
+        return True
+    except ValidationError as e:
+        logging.error(f"✗ Validation failed: {e.message}")
+        return False
 
 
-
-async def read_serial_values(ser: serial.Serial, rows: list) -> dict:
-    """
-    Docstring for get_values
-    """
-    # timestamp for the beggining of the reading
-    start= -1
-    while True:
-        if ser.in_waiting > 0:
-            line = ser.readline().decode('utf-8').strip()
-            #print(f"Received from Pico: {line}")
-            
-            # Parse the line into a dataframe
-            try:
-                t, _, i1, v1, _, i2, v2, _, i3, v3 = line.split(' ')
-                
-                # Set the start time based on the first timestamp received
-                if start < 0:
-                    start= float(t)
-                t= float(t) - start
-
-                rows.append({
-                    't': float(t),
-                    'i1': float(i1),
-                    'v1': float(v1),
-                    'i2': float(i2),
-                    'v2': float(v2),
-                    'i3': float(i3),
-                    'v3': float(v3),
-                })
-                #print(f"Collected {len(rows)} rows")
-            except Exception as e:
-                print(f"Error parsing line: {e}")
-                print(f"Line content: {line}")
-        await asyncio.sleep(1e-3)
+async def static_run(static: dict) -> None:
+    duration= static['duration']
+    logging.info(f"⏳ getting data for {duration} seconds...")
+    await asyncio.sleep(duration)
+    logging.info("✓ Static run completed.")
 
 
-async def plot_values(rows: list, set: dict):
+async def plot_values(rows: list, par: dict, dir: Path):
     _, ax = plt.subplots()
-    print(f"Starting plot for {set}")
+    logging.info(f"ℹ️ Starting plot for {par}")
     while True:
         if len(rows) > 5:
             df = pd.DataFrame(rows)
-            print(f"Plotting {len(df)} data points")
+            #logging.debug(f"Plotting {len(df)} data points")
             
             ax.clear()  # Clear the axes
-            ax.scatter(df[set['x']], df[set['y']], color='black')
-            ax.set_xlabel(set['xlabel'])
-            ax.set_ylabel(set['ylabel'])
-            ax.set_title(set['name'])
+            for y in par['y']:
+                ax.scatter(df[par['x']], df[y], label=y)
+            ax.set_xlabel(par['xlabel'])
+            ax.set_ylabel(par['ylabel'])
+            ax.set_title(par['name'])
             ax.grid()
             plt.draw()  # Update the plot
-            plt.savefig(set['file']) # Save the figure to file
+            if 'file' in par:
+                plt.savefig(dir / par['file']) # Save the figure to file
             plt.pause(0.01)  # Small pause to allow rendering
             
         await asyncio.sleep(PLOT_INTERVAL)
@@ -195,40 +115,56 @@ async def plot_values(rows: list, set: dict):
 
 async def main():
 
-    file= Path('current_gen.yaml')
+    file= args.file
     dir= file.parents[0]
-    config = read_yaml( Path(file).resolve() )
+
+    # Validate YAML against schema
+    schema= Path('schema.yaml')
+    if not validate_yaml(file, schema):
+        return
+    
+    # Load configuration using helper that opens the file
+    config = read_yaml(file)
 
     # Execute required electical characterization based on configurations
-    for c in config.keys():
-        if 'carac' not in c.lower():
-            continue
-        print(f"Running electrical characterization: {c}")
+    for c in config['caracs']:
+        logging.info(f"ℹ️ Running electrical characterization: {c.get('name')}")
 
         # Setting up the pico to the sampling rate and time step
-        ser= serial.Serial(PERIPHERAL, PERIPHERAL_BAUDRATE)
-        initialize_channels(config[c], ser)
+        ser= serfn.setup_serial_link(args.device, args.baud, c['init'])
 
-        # Purge the serial buffer before starting the sweep
-        ser.reset_input_buffer()
+        # Make sure panel switches are at their right position
+        range= serfn.wait_until_panel_ready(ser, c['init'])
+
+        # Load the calibration files
+        if 'calibration folder' in config:
+            calfn.load_calibration_files(range, serfn.channels, Path(config['calibration folder']))
 
         # Define async tasks for reading serial values and running sweeps
         rows= []
         task_list=[]
-        task_list.append(asyncio.create_task(read_serial_values(ser, rows)))
-        task_list.append(asyncio.create_task(run_sweep(config[c], ser)))
+        task_list.append(asyncio.create_task(serfn.read_serial_values(ser, rows, serfn.channels)))
+        if 'sweep' in c:
+            task_list.append(asyncio.create_task(serfn.run_sweep(c['sweep'], ser)))
+        elif 'static' in c:
+            # if no sweep defined, just wait for the specified duration while reading values
+            task_list.append(asyncio.create_task(static_run(c['static'])))
+        else:
+            logging.error("✗ No sweep or static defined in the configuration. Exiting.")
+            serfn.initialize_channels(None, ser)
+            continue
 
         # prepare the list of plots to generate
-        for plot in config[c].keys():
-            if 'plot' in plot.lower():
-                task_list.append(asyncio.create_task(plot_values(rows, config[c][plot])))
+        if 'plots' in c:
+            for p in c['plots']:
+                task_list.append(asyncio.create_task(plot_values(rows, p, dir)))
 
         _, pending = await asyncio.wait(
             task_list,
             return_when=asyncio.FIRST_COMPLETED
         )
 
-        print("First task completed. Cancelling others...")
+        logging.info("✓ First task completed. Cancelling others...")
         for task in pending:
             task.cancel()
 
@@ -238,24 +174,22 @@ async def main():
         except asyncio.CancelledError:
             pass
 
-
         # Reset to standby after the sweep
-        initialize_channels(standby, ser)
+        serfn.initialize_channels(None, ser)
 
+        if 'datafile' in c:
+            data = pd.DataFrame(rows)
+            outfile= dir / c['datafile']
+            data.to_csv(outfile, index=False)
+            logging.info(f"✓ Results saved to {outfile}")
 
-        data = pd.DataFrame(rows)
-        outfile= dir / config[c]['datafile']
-        data.to_csv(outfile, index=False)
-        print(f"Results saved to {outfile}")
-
-        input("Press any key to exit...") # allows to keep the graph open
+        input("Press any key to end this characterization") # allows to keep the graph open
 
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except Exception as e:
-        print('Error occurred: ', e)
+        logging.error('✗ Error occurred: ', e)
     except KeyboardInterrupt:
-        print('Program Interrupted by the user')
-
+        logging.error('✗ Program Interrupted by the user')

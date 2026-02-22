@@ -4,30 +4,28 @@ component: 1k resistor
 carac 1:
     comment: Small step
     datafile: small_step.dat
+    range: 0
     setup:
         voffset: 0
         sampling: 100
     init:
         ch1:
-            v: 0
+            v: nc
         ch2:
-            v: 0
+            v: nc
         ch3:
-            v: 0
-    sweep:
-        channel:
-            ch1: i
-        values: 0 100 200 300 200 100 0
-        timestep: 2
+            v: nc
+    watch:
+        duration: 5
     plot 1:
-        name: Resistance 1 kOhm
-        file: plot1.png
-        x: i1
-        xlabel: Current (mA)
+        name: Voltage versus time
+        file: plot2.png
+        x: t
+        xlabel: Time (s)
         y: v1
         ylabel: Voltage (V)
     plot 2:
-        name: Resistance 1 kOhm
+        name: Current versus time
         file: plot2.png
         x: t
         xlabel: Time (s)
