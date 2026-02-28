@@ -41,7 +41,27 @@ SHUNTS= {
     4: 1000
 }
 
+# Max current per ammeter range in milliamps
+MAX_CURRENTS={
+    0: 1e3,
+    1: 1e2,
+    2: 1e0,
+    3: 1e-1,
+    4: 1e-2
+}
+
+# Max votage before switching a safety relay
+MAX_VOLTAGE= 8
+
 # Push-pull output switches status input
 PP_SWITCH_CHA= 19
 PP_SWITCH_CHB= 20
 PP_SWITCH_CHC= 21
+
+# Safety relays control pins
+SR_PIN_CHA= 26
+SR_PIN_CHB= 27
+SR_PIN_CHC= 28
+
+# Safety relays reactivation button
+SR_ACTIVATE_PIN= 22

@@ -56,7 +56,7 @@ def get_current_config(ser: serial.Serial) -> dict:
     safe_write(ser,"USER PANEL STATE")
 
     # Wait for an answer
-    while True:
+    for _ in range(1,20):
         if ser.in_waiting > 0:
             line = ser.readline().decode('utf-8').strip()
             if line.startswith('STATE'):
@@ -67,11 +67,16 @@ def get_current_config(ser: serial.Serial) -> dict:
                         'AmmeterRange': line[1],
                         'a_PushPullConnected': line[2],
                         'b_PushPullConnected': line[3],
-                        'c_PushPullConnected': line[4]
+                        'c_PushPullConnected': line[4],
+                        'Communicating': True
                     }
                 except Exception as e:
                     logging.error(f"✗ Error parsing board state: {e}")
                     logging.error(f"✗ Line content: {line}")
+        sleep(0.1)
+    return{
+        'Communicating': False
+    }
 
 
 
@@ -170,18 +175,19 @@ async def run_sweep(sweep: dict, ser: serial.Serial) -> bool:
 
 
 
-async def read_serial_values(ser: serial.Serial, rows: list, channels: list, loop_mode= True) -> None:
+async def read_serial_values(ser: serial.Serial, rows: list, events: list, channels: list, loop_mode= True) -> None:
     """
     This function continuouly reads serial port incoming messages
-    If the message contains a row with datapoints, it parses it ad appends it to the dataset
+    If the message contains a row with datapoints, it parses and appends it to the dataset
     If a calib file is available, it will apply the corrections
+    If the message contains something else than datapoints, it appends it to the events list
 
     Arguments:
         - Serial port connection
-        - Dataset that must be appended
+        - Data rows list to be updated
+        - Event list that to be updated
         - List of offsets (one for each channel)
         - List of current coeeficients (one for each channel)
-    
     """
     expected_tokens = 3 * len(channels) + 1
     # timestamp for the beggining of the reading
@@ -197,11 +203,11 @@ async def read_serial_values(ser: serial.Serial, rows: list, channels: list, loo
             # Parse the line into a dataframe
             try:
                 # Use split with a bounded number of splits to avoid accidental extra tokens
-                parts = line.split(maxsplit=expected_tokens - 1)
+                parts = line.split(' ')
                 # Skip lines that don't have the expected number of elements
                 if len(parts) != expected_tokens:
-                    logging.warning("⚠ Skipping line with the wrong number of fields")
-                    logging.warning(parts)
+                    logging.debug(f"Recieved event {line}")
+                    events.append(line)
                     continue
 
                 row = {}
@@ -219,12 +225,20 @@ async def read_serial_values(ser: serial.Serial, rows: list, channels: list, loo
                 for idx, ch in enumerate(channels):
                     logging.debug("Parsing channel %s", idx)
                     try:
-                        i = float(parts[3*idx + 2])
+                        i = parts[3*idx + 2]
+                        if i != 'None':
+                            i= float(i)
+                        else: # This happens when switching range
+                            i = float('nan')
                     except Exception as e:
                         logging.error(f"Error parsing current for channel {ch.get('name', idx)}: {e}")
                         i = float('nan')
                     try:
-                        v = float(parts[3*idx + 3])
+                        v = parts[3*idx + 3]
+                        if v != 'None':
+                            v= float(v)
+                        else: # not supposed to happen
+                            v = float('nan')
                     except Exception as e:
                         logging.error(f"Error parsing voltage for channel {ch.get('name', idx)}: {e}")
                         v = float('nan')

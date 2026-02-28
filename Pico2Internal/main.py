@@ -8,6 +8,7 @@ sampling_freq = 1
 # Current range switch
 range_switch= None
 
+
 async def serial_write(channels:list):
     global sampling_freq
     while True:
@@ -22,14 +23,12 @@ async def serial_write(channels:list):
         message=f"{current_time} "
         for ch in channels:
             message += f"{ch['Name']} {ch['I_Measured']} {ch['V_Measured']} "
-        message+= '\n'
-
-        uart1.write(message.encode('utf-8'))
+        write_serial(message)
         #print("Sending message over UART:", message.strip())
         await asyncio.sleep_ms(int(1000/sampling_freq))  # Send message every second
 
 
-def adjust_channel(ch:dict, row:list) -> None:
+async def adjust_channel(ch:dict, row:list) -> None:
     try:
         # Case when the user yaml ask for a mesurement with push pull output disconnected
         if row[1] == 'nc':
@@ -37,15 +36,17 @@ def adjust_channel(ch:dict, row:list) -> None:
 
         # Set the channel to votage regulation
         elif row[1] == 'v':
-            ch['V_SetPoint'] = 0
-            ch['I_SetPoint'] = None
-            print(f"Channel {ch['Name']} set to voltage regulation mode")
+            if ch['V_SetPoint'] is None: #ignore if already in the right mode
+                ch['V_SetPoint'] = 0
+                ch['I_SetPoint'] = None
+                print(f"Channel {ch['Name']} set to voltage regulation mode")
         
         # Set the channel to current regulation
         elif row[1] == 'i':
-            ch['V_SetPoint'] = None
-            ch['I_SetPoint'] = 0
-            print(f"Channel {ch['Name']} set to current regulation mode")
+            if ch['I_SetPoint'] is None: #ignore if already in the right mode
+                ch['V_SetPoint'] = None
+                ch['I_SetPoint'] = 0
+                print(f"Channel {ch['Name']} set to current regulation mode")
 
         # Set the setpoint value
         elif is_numeric(row[1]):
@@ -55,6 +56,15 @@ def adjust_channel(ch:dict, row:list) -> None:
             else:
                 ch['I_SetPoint']= float(row[1])
                 print(f"Channel {ch['Name']}: I_Setpoint set to {float(row[1])}")
+        
+        # Set the max power value
+        elif row[1][-1]=='w':
+            mp= row[1][0:-1]
+            if float(mp):
+                ch['MaxPower']= float(mp)*1000 # Set the power in mW internally
+                print(f"Channel {ch['Name']}: Max_Power set to {float(mp)}")
+            else:
+                print("Cannot parse MaxPower value {mp}")
         else:
             print("Invalid parameter for channel adjustment:", row[1])
     except Exception as e:
@@ -110,7 +120,7 @@ async def serial_read(channels:list):
                             elif len(row) == 2:
                                 for ch in channels:
                                     if ch['Name']==row[0]:
-                                        adjust_channel(ch, row)
+                                        await adjust_channel(ch, row)
                                         processed= True
                                         break
 
@@ -134,6 +144,17 @@ def send_user_panel_state(channels: list) -> None:
     message= f"STATE {range_switch}"
     for ch in channels:
         message+=  f" {ch['PushPullConnected']}"
+        # If regulation is active, reset the State variable 
+        # so that send_channels_state() function will update it
+        if ch['PushPullConnected']:
+            ch['State']=''
+    write_serial(message)
+
+
+def write_serial(message: str) -> None:
+    """
+    This function writes the provided message on the serial connection uart1
+    """
     message+= '\n'
     uart1.write(message.encode('utf-8'))
 
@@ -164,6 +185,7 @@ async def watch_user_panel_state(channels:list):
                     ch['Range']= selected
                     ch['Rshunt'] = SHUNTS[selected]
                 range_switch= selected
+                write_serial(f"Range {range_switch} selected")
         else:
             print("Invalid shunt resistor selection: ", [pin.value() for pin in range_selector_pins])
             for ch in channels:
@@ -175,7 +197,33 @@ async def watch_user_panel_state(channels:list):
             if swstate != ch['PushPullConnected']:
                 print(f"Push-pull switch set to {swstate} on channel {ch['Name']}")
                 ch['PushPullConnected']= swstate
+                write_serial(f"CH {ch['Name']} PushPullConnected {swstate}")
         await asyncio.sleep_ms(50)
+
+
+async def send_channels_state(channels:list):
+    while True:
+        for ch in channels:
+            if ch['SafetyRelayOn'] and ch['PushPullConnected']:
+                # Clamp duty cycle to valid range when saturation occurs
+                if ch['Duty'] == 0:
+                    if ch['State'] != 'Saturation High':
+                        print(f"Ch {ch['Name']} running on saturation High")
+                        ch['State']= 'Saturation High'
+                        write_serial(f"State {ch['Name']} Saturation High")
+                elif ch['Duty'] == PWM_RESOLUTION:
+                    if ch['State'] != 'Saturation Low':
+                        print(f"Ch {ch['Name']} running on saturation Low")
+                        ch['State']= 'Saturation Low'
+                        write_serial(f"State {ch['Name']} Saturation Low")
+                else:
+                    if ch['State'] != 'PID Regulation':
+                        # Add some hysteresis before getting back to the regulating state
+                        if ch['Duty'] < 0.95*PWM_RESOLUTION and ch['Duty'] > 0.05*PWM_RESOLUTION:
+                            print(f"Ch {ch['Name']} regulating")
+                            ch['State']= 'PID Regulation'
+                            write_serial(f"State {ch['Name']} PID Regulation")
+        await asyncio.sleep_ms(500)
 
 
 async def regulator(ch:dict):
@@ -244,7 +292,6 @@ async def regulator(ch:dict):
         await asyncio.sleep_ms(PID_DT)
 
 
-
 def update_load(ch: dict) -> float:
     """
     This function calculate the load on the channel by calculating v/i
@@ -265,7 +312,6 @@ def update_load(ch: dict) -> float:
     ch['Load'].append(R)
 
     return sum(ch['Load']) / len(ch['Load'])
-
 
 
 async def do_nothing():
@@ -304,6 +350,9 @@ def poll_sensors(ch:dict) -> tuple:
     
     except Exception as e:
         print(f"Error polling sensors on channel {ch['Name']}: ", e)
+        # Disconnect the safety relay since we lost communication with sensors
+        ch['SafetyRelayOn']= False
+        ch['SafetyRelayPin'].value(1)
         return (None, None)
 
 
@@ -339,6 +388,59 @@ async def test_pwm_output():
         print(f"{duty}\t{v}")
 
 
+async def safety_relays_control(channels:list)-> None:
+    """
+    This function monitors current, voltage and power on each channel
+    It checkes for
+        - the voltage and current limits givent in congif.py (board protection)
+        - user-defined MaxPower variable set for each channel (measured device protection)
+    A the safety relay is triggered if a value is exceeded
+    Then the user has to press a button to reactivate the output
+    """
+    # On startup, activate all the realys
+    for ch in channels:
+        ch['SafetyRelayPin'].value(0)
+    # Then we get in the monitoring loop
+    while True:
+        await asyncio.sleep_ms(100)
+        for ch in channels:
+            currently_on= ch['SafetyRelayOn']
+            v= ch['V_Measured']
+            i= ch['I_Measured']
+            message=""
+            # Voltage limit
+            if v is not None and v > MAX_VOLTAGE:
+                ch['SafetyRelayOn']= False
+                message="Max voltage reached"
+            # Current limit
+            if ch['Range'] is not None and i is not None:
+                if i > MAX_CURRENTS[ch['Range']]:
+                    ch['SafetyRelayOn']= False
+                    message="Max current reached"
+            # Power limit
+            if ch['MaxPower'] is not None and v is not None and i is not None:
+                if i*v > ch['MaxPower']:
+                    ch['SafetyRelayOn']= False
+                    message="Max power reached"
+            # Actuate the relay is a change was detected
+            if ch['SafetyRelayOn'] != currently_on:
+                ch['SafetyRelayPin'].value(1)
+                print(f"Ch {ch['Name']}: SafetyRelayOn Going from {currently_on} to {ch['SafetyRelayOn']}")
+                ch['State']='Alert'
+                write_serial(f"CH {ch['Name']} Alert {message}")
+        
+        # Check if the user is holding the reactivation button
+        buttonstate= not bool(sractivate.value())
+        if buttonstate:
+            print("User-button pressed, reactivating all safety switches...")
+            for ch in channels:
+                ch['SafetyRelayOn']= True
+                ch['SafetyRelayPin'].value(0)
+                # Update the push-pull switch state to refresh the textbox showing the board status
+                write_serial(f"CH {ch['Name']} PushPullConnected {ch['PushPullConnected']}")
+
+
+
 async def main():
     print("Starting the program...")
 
@@ -347,6 +449,7 @@ async def main():
         {'Name': 'a',
         'V_SetPoint': 0,  # Target voltage in volts
         'I_SetPoint': None,  # Target current in milliamps
+        'MaxPower': None,
         'V_Measured': None,
         'I_Measured': None,
         'Range': None,
@@ -354,6 +457,9 @@ async def main():
         'Load': [],
         'Duty': 0,
         'PushPullConnected': True,
+        'State': '',
+        'SafetyRelayPin': sra,
+        'SafetyRelayOn': True,
         'SwitchPin': ppswitcha,
         'pwm': pwma,
         'HigIDevice': inaA,
@@ -363,6 +469,7 @@ async def main():
         {'Name': 'b',
         'V_SetPoint': 0,  # Target voltage in volts
         'I_SetPoint': None,  # Target current in milliamps
+        'MaxPower': None,
         'V_Measured': None,
         'I_Measured': None,
         'Range': None,
@@ -370,6 +477,9 @@ async def main():
         'Load': [],
         'Duty': 0,
         'PushPullConnected': False,
+        'State': '',
+        'SafetyRelayPin': srb,
+        'SafetyRelayOn': True,
         'SwitchPin': ppswitchb,
         'pwm': pwmb,
         'HigIDevice': inaA,
@@ -379,6 +489,7 @@ async def main():
         {'Name': 'c',
         'V_SetPoint': 0,  # Target voltage in volts
         'I_SetPoint': None,  # Target current in milliamps
+        'MaxPower': None,
         'V_Measured': None,
         'I_Measured': None,
         'Range': None,
@@ -386,6 +497,9 @@ async def main():
         'Load': [],
         'Duty': 0,
         'PushPullConnected': False,
+        'State': '',
+        'SafetyRelayPin': src,
+        'SafetyRelayOn': True,
         'SwitchPin': ppswitchc,
         'pwm': pwmc,
         'HigIDevice': inaA,
@@ -399,11 +513,15 @@ async def main():
     # Start serial communication task
     asyncio.create_task(serial_write(channels))
     asyncio.create_task(serial_read(channels))
+    asyncio.create_task(send_channels_state(channels))
 
     # Start the regulation tasks
     for ch in channels:
         asyncio.create_task(regulator(ch))
 
+    # Safety relays task
+    asyncio.create_task(safety_relays_control(channels))
+    
     # Start do_nothing task to keep the event loop running
     asyncio.create_task(do_nothing())
 

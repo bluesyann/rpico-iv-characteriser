@@ -61,3 +61,11 @@ range_selector_pins = [Pin(pin_num, Pin.IN, Pin.PULL_UP) for pin_num in RANGE_SE
 ppswitcha= Pin(PP_SWITCH_CHA, Pin.IN, Pin.PULL_UP)
 ppswitchb= Pin(PP_SWITCH_CHB, Pin.IN, Pin.PULL_UP)
 ppswitchc= Pin(PP_SWITCH_CHC, Pin.IN, Pin.PULL_UP)
+
+# Safetey relays pins
+sra= Pin(SR_PIN_CHA, Pin.OUT)
+srb= Pin(SR_PIN_CHB, Pin.OUT)
+src= Pin(SR_PIN_CHC, Pin.OUT)
+
+# Safety relays reactivation button
+sractivate= Pin(SR_ACTIVATE_PIN, Pin.IN, Pin.PULL_UP)
