@@ -48,14 +48,18 @@ properties:
               maxItems: 3
               items:
                 type: object
-                required: [name, control]
+                required: [Name, control]
                 properties:
-                  name:
+                  Name:
                     type: string
                     pattern: "^[a-zA-Z0-9]+$"
                   control:
                     type: string
                     enum: [v, i, nc]
+                  max power:
+                    type: number
+                    minimum: 0
+                    maximum: 10
                   initvalue:
                     type: number
                     minimum: -1000

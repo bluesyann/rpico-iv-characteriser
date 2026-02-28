@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 plt.ion()  # Enable interactive mode
 
 import os
+import signal
 def is_valid_file(parser, arg):
     if not os.path.isfile(arg):
         parser.error(f"The file {arg} does not exist!")
@@ -21,6 +22,7 @@ parser.add_argument('file', type=lambda x: is_valid_file(parser, x), help='YAML 
 parser.add_argument('-device', type=str, default='/dev/ttyACM0', help='Path to the Raspberry Pico device.')
 parser.add_argument('-baud', type=int, default=115200, help='Baud rate for serial communication.')
 parser.add_argument('-d', '--debug', action='store_true', help='Activate debug logging.')
+parser.add_argument('--no-prompt', action='store_true', help="Don't wait for interactive prompt at the end of a characterization")
 args = parser.parse_args()
 
 import logging
@@ -45,8 +47,6 @@ pip install pyserial pyyaml pandas
 
 """
 Decouple plotting: Move plotting out of the asyncio loop (separate process) so matplotlib I/O and rendering cannot interfere with sampling. The main loop should only provide data copies.
-Graceful shutdown: Handle signals (SIGINT, SIGTERM) to stop tasks/processes cleanly, flush data to CSV, and join worker processes.
-provide a requirements.txt for reproducible venvs.
 Unit tests & CI: Add tests for parsing, range_float, resample_xy, and calibration coefficient calculations. Run tests in CI to catch regressions.
 Code quality: Add type hints, small docstrings, move reusable logic into modules, and run flake8/black for consistency. Replace magic numbers (sleep intervals) with named constants.
 """
@@ -54,17 +54,19 @@ Code quality: Add type hints, small docstrings, move reusable logic into modules
 PLOT_INTERVAL = 1.0  # seconds
 
 
-def read_yaml(filepath: Path):
-    config = {}
+def read_yaml(filepath: Path)-> dict:
     try:
         logging.info(f"ℹ️ Parsing yaml file at: {filepath}")
         with open(filepath, 'r') as f:
             loaded = yaml.safe_load(f)
             if isinstance(loaded, dict):
                 config = loaded
+                return config
+            else:
+                return None
     except Exception as e:
         logging.error(f"✗ Error opening file: {e}")
-    return config
+        return None
 
 
 def validate_yaml(data_file: Path, schema_file: Path) -> bool:
@@ -83,6 +85,52 @@ def validate_yaml(data_file: Path, schema_file: Path) -> bool:
         return False
 
 
+def create_channels(config: dict)-> list:
+    """
+    Create the channels according to the configuration dictionnary
+    Returns the list of channels
+    """
+    channel_names = config['setup']['channels']
+    channels=[]
+    for name in channel_names:
+        ch={
+            'Name': name,
+            'VData': [], # Array to store voltage serie 
+            'IData': [], # Array to store current serie
+            'TData': [], # Array to store time serie
+            'SetPoint': config['setup']['setpoint'], # Setpoint of the channel
+            'Unit': config['setup']['unit'], # Unit of this setpoint (V or I for voltage or current regulation)
+            'MaxPower': config['setup']['max power'], # Maximum power before disconnecting the channel
+
+            'ioffset': None,
+            'icoef': 1
+        }
+        channels.append(ch)
+    return channels
+
+
+def get_channel_time_series(channels: list)-> pd.DataFrame:
+    """
+    This function extract the voltage and current vs time of all channels
+    and return it in a single pandas dataframe
+    """
+    df= pd.DataFrame()
+    try:
+        for ch in channels:
+            chdf= pd.DataFrame(list(zip(ch['TData'], ch['VData'], ch['IData'])),
+                                    columns=['t', f"v{ch['Name']}", f"i{ch['Name']}"])
+            if df.empty:
+                df=chdf
+            else:
+                df= pd.merge(df, chdf, on='t')
+        # Start the timescale at t=0
+        df['t']= df['t'] - df['t'].min()
+        return df
+    except Exception as e:
+        logging.error(f"Error while building the dataframe from channels: {e}")
+        return pd.DataFrame()
+
+
 async def static_run(static: dict) -> None:
     duration= static['duration']
     logging.info(f"⏳ getting data for {duration} seconds...")
@@ -90,106 +138,167 @@ async def static_run(static: dict) -> None:
     logging.info("✓ Static run completed.")
 
 
-async def plot_values(rows: list, par: dict, dir: Path):
+async def plot_values(channels: list, par: dict, dir: Path):
+    """
+    This function show real-time charts of channel data according to
+    the user requirements depicted in the input yaml file
+    """
     _, ax = plt.subplots()
     logging.info(f"ℹ️ Starting plot for {par}")
     while True:
-        if len(rows) > 5:
-            df = pd.DataFrame(rows)
-            #logging.debug(f"Plotting {len(df)} data points")
-            
-            ax.clear()  # Clear the axes
-            for y in par['y']:
-                ax.scatter(df[par['x']], df[y], label=y)
-            ax.set_xlabel(par['xlabel'])
-            ax.set_ylabel(par['ylabel'])
-            ax.set_title(par['name'])
-            ax.grid()
-            plt.draw()  # Update the plot
-            if 'file' in par:
-                plt.savefig(dir / par['file']) # Save the figure to file
-            plt.pause(0.01)  # Small pause to allow rendering
+        try:
+            df= get_channel_time_series(channels)
+
+            if len(df) > 5:
+                logging.debug(f"Plotting {len(df)} data points")
+                
+                ax.clear()  # Clear the axes
+                for y in par['y']:
+                    ax.scatter(df[par['x']], df[y], label=y)
+                ax.set_xlabel(par['xlabel'])
+                ax.set_ylabel(par['ylabel'])
+                ax.set_title(par['name'])
+                ax.grid()
+                plt.draw()  # Update the plot
+                if 'file' in par:
+                    plt.savefig(dir / par['file']) # Save the figure to file
+                plt.pause(0.01)  # Small pause to allow rendering
+        except Exception as e:
+            logging.error(f"Error while drawing chart: {e}")
             
         await asyncio.sleep(PLOT_INTERVAL)
 
 
-async def main():
+async def main()-> None:
+    usr_file= args.file
+    dir= usr_file.parents[0]
 
-    file= args.file
-    dir= file.parents[0]
+    # read configuration yaml file
+    confpath= Path('pispos_config.yaml')
+    config = read_yaml(confpath)
 
-    # Validate YAML against schema
+    # Create the channels according to the configuration file
+    channels= create_channels(config)
+
+
+    # Validate input YAML file against schema
     schema= Path('schema.yaml')
-    if not validate_yaml(file, schema):
+    if not validate_yaml(usr_file, schema):
         return
     
     # Load configuration using helper that opens the file
-    config = read_yaml(file)
+    usr_input = read_yaml(usr_file)
 
     # Execute required electical characterization based on configurations
-    for c in config['caracs']:
-        logging.info(f"ℹ️ Running electrical characterization: {c.get('name')}")
+    for carac in usr_input['caracs']:
+        logging.info(f"ℹ️ Running electrical characterization: {carac['name']}")
 
-        # Setting up the pico to the sampling rate and time step
-        ser= serfn.setup_serial_link(args.device, args.baud, c['init'])
-
-        # Make sure panel switches are at their right position
-        range= serfn.wait_until_panel_ready(ser, c['init'])
-
-        # Load the calibration files
-        if 'calibration folder' in config:
-            calfn.load_calibration_files(range, serfn.channels, Path(config['calibration folder']))
-
-        # Define async tasks for reading serial values and running sweeps
-        rows= []
-        task_list=[]
-        task_list.append(asyncio.create_task(serfn.read_serial_values(ser, rows, serfn.channels)))
-        if 'sweep' in c:
-            task_list.append(asyncio.create_task(serfn.run_sweep(c['sweep'], ser)))
-        elif 'static' in c:
-            # if no sweep defined, just wait for the specified duration while reading values
-            task_list.append(asyncio.create_task(static_run(c['static'])))
-        else:
-            logging.error("✗ No sweep or static defined in the configuration. Exiting.")
-            serfn.initialize_channels(None, ser)
-            continue
-
-        # prepare the list of plots to generate
-        if 'plots' in c:
-            for p in c['plots']:
-                task_list.append(asyncio.create_task(plot_values(rows, p, dir)))
-
-        _, pending = await asyncio.wait(
-            task_list,
-            return_when=asyncio.FIRST_COMPLETED
-        )
-
-        logging.info("✓ First task completed. Cancelling others...")
-        for task in pending:
-            task.cancel()
-
-        # Wait for cancellation to be processed
+        ser = None
+        loop = None
         try:
-            await asyncio.gather(*pending, return_exceptions=True)
-        except asyncio.CancelledError:
-            pass
+            # Setting up the pico to the sampling rate and time step
+            ser = serfn.setup_serial_link(args.device, args.baud, carac['init'])
+            if ser is None:
+                logging.error("Cant connect to serial device")
+                return
 
-        # Reset to standby after the sweep
-        serfn.initialize_channels(None, ser)
+            # Make sure panel switches are at their right position
+            range = serfn.wait_until_panel_ready(ser, carac['init'])
 
-        if 'datafile' in c:
-            data = pd.DataFrame(rows)
-            outfile= dir / c['datafile']
-            data.to_csv(outfile, index=False)
-            logging.info(f"✓ Results saved to {outfile}")
+            # Load the calibration files
+            calfn.load_calibration_files(range, channels, Path(config['setup']['calibration folder']))
 
-        input("Press any key to end this characterization") # allows to keep the graph open
+            # Define async tasks for reading serial values and running sweeps
+            events = []
+            task_list = []
+            task_list.append(asyncio.create_task(serfn.read_serial_loop(ser, events, channels)))
+            if 'sweep' in carac:
+                task_list.append(asyncio.create_task(serfn.run_sweep(carac['sweep'], ser)))
+            elif 'static' in carac:
+                # if no sweep defined, just wait for the specified duration while reading values
+                task_list.append(asyncio.create_task(static_run(carac['static'])))
+            else:
+                logging.error("✗ No sweep or static defined in the configuration. Exiting.")
+                serfn.initialize_channels(None, ser)
+                continue
 
+            # prepare the list of plots to generate
+            if 'plots' in carac:
+                for chart in carac['plots']:
+                    task_list.append(asyncio.create_task(plot_values(channels, chart, dir)))
+
+            # Handle signals: create a stop event and a waiter task
+            stop = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            stop_task = asyncio.create_task(stop.wait())
+
+            def _signal_handler():
+                logging.info("ℹ️ Signal received, stopping tasks...")
+                stop.set()
+
+            for s in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(s, _signal_handler)
+                except NotImplementedError:
+                    # Windows or unsupported loop implementation
+                    pass
+
+            wait_tasks = task_list + [stop_task]
+            _, pending = await asyncio.wait(
+                wait_tasks,
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            if stop.is_set():
+                logging.info("✓ Stopping due to external signal")
+            else:
+                logging.info("✓ First task completed. Cancelling others...")
+
+            for task in pending:
+                task.cancel()
+
+            # Wait for cancellation to be processed
+            try:
+                await asyncio.gather(*pending, return_exceptions=True)
+            except asyncio.CancelledError:
+                pass
+
+            # close the serial link
+            serfn.close_serial_link(ser)
+            ser=None
+
+            if 'datafile' in carac:
+                data = get_channel_time_series(channels)
+                outfile = dir / carac['datafile']
+                data.to_csv(outfile, index=False)
+                logging.info(f"✓ Results saved to {outfile}")
+
+            if not args.no_prompt:
+                try:
+                    await asyncio.to_thread(input, "Press Enter to end this characterization")
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logging.error('✗ Error occurred: %s', e)
+        finally:
+            # Remove signal handlers if we registered them
+            try:
+                if loop is not None:
+                    for s in (signal.SIGINT, signal.SIGTERM):
+                        try:
+                            loop.remove_signal_handler(s)
+                        except Exception:
+                            pass
+            except NameError:
+                pass
+
+            # Ensure serial link is closed
+            if ser is not None:
+                try:
+                    serfn.close_serial_link(ser)
+                except Exception:
+                    pass
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logging.error('✗ Error occurred: ', e)
-    except KeyboardInterrupt:
-        logging.error('✗ Program Interrupted by the user')
+    asyncio.run(main())

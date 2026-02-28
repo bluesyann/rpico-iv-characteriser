@@ -11,20 +11,38 @@ STANDBY={
     'voffset': 0,
     'sampling': 1,
     'channels':[
-        {'Name': 'a','control': 'v', 'initvalue': 0},
-        {'Name': 'b','control': 'v', 'initvalue': 0},
-        {'Name': 'c','control': 'v', 'initvalue': 0}
+        {'Name': 'a','control': 'v'},
+        {'Name': 'b','control': 'v'},
+        {'Name': 'c','control': 'v'}
     ]
 }
 
+SLOW_LOOP_TIME=1
+FAST_LOOP_TIME=1e-3
+WRITE_DELAY=1e-1
+
+
 def setup_serial_link(device: str, baud: int, init: dict):
-    ser= serial.Serial(device, baud, timeout=1)
-    initialize_channels(init, ser)
+    try:
+        ser= serial.Serial(device, baud, timeout=1)
+        initialize_channels(init, ser)
 
-    # Purge the serial buffer
-    ser.reset_input_buffer()
-    return ser
+        # Purge the serial buffer
+        ser.reset_input_buffer()
+        return ser
+    except Exception as e:
+        logging.error(f"Error while setting up serial connection: {e}")
+        return None
 
+
+def close_serial_link(ser: serial.Serial)-> None:
+    if ser is not None:
+        try:
+            initialize_channels(None, ser)
+            ser.close()
+            logging.info("Serial port closed")
+        except Exception as e:
+            logging.error(f"Error closing serial port: {e}")
 
 
 def get_current_config(ser: serial.Serial) -> dict:
@@ -39,8 +57,8 @@ def get_current_config(ser: serial.Serial) -> dict:
     safe_write(ser,"USER PANEL STATE")
 
     # Wait for an answer
-    for _ in range(1,20):
-        if ser.in_waiting > 0:
+    for _ in range(1,30):
+        while ser.in_waiting > 0:
             line = ser.readline().decode('utf-8').strip()
             if line.startswith('STATE'):
                 logging.debug(line)
@@ -56,7 +74,7 @@ def get_current_config(ser: serial.Serial) -> dict:
                 except Exception as e:
                     logging.error(f"✗ Error parsing board state: {e}")
                     logging.error(f"✗ Line content: {line}")
-        sleep(0.1)
+        sleep(SLOW_LOOP_TIME)
     return{
         'Communicating': False
     }
@@ -75,30 +93,36 @@ def wait_until_panel_ready(ser: serial.Serial, init: dict) -> int:
         - Ammeter range switch state (0,1,2,3 or 4)
     """
     ready= False
-    r= None
+    range_index= None
     while not ready:
-        ready= True
         # Ask for the current switches state
         board_state= get_current_config(ser)
         logging.debug(f"Current board state: {board_state}")
-
-        # Check if the current panel switches matche the yaml requirements
-        r= int(board_state['AmmeterRange']) # current range switch
-        if r != int(init['range']):
-            logging.info(f"ℹ️ Please set the ammeter range to {init['range']}")
-            ready= False
-        for ch in init['channels']:
-            required_state= ch['control']
-            current_state= board_state[f"{ch['Name']}_PushPullConnected"]
-            logging.debug(f"Required state for Ch{ch}: {required_state}")
-            if required_state == 'nc' and current_state == 'True':
-                logging.info(f"ℹ️ Please disable the push-pull output from {ch['Name']}")
+        if not board_state['Communicating']:
+            logging.info("ℹ️ Cannot get an answer from the board")
+        else:
+            try:
+                ready= True
+                # Check if the current panel switches matche the yaml requirements
+                range_index= int(board_state['AmmeterRange']) # current range switch
+                if range_index != int(init['range']):
+                    logging.info(f"ℹ️ Please set the ammeter range to {init['range']}")
+                    ready= False
+                for ch in init['channels']:
+                    required_state= ch['control']
+                    current_state= board_state[f"{ch['Name']}_PushPullConnected"]
+                    logging.debug(f"Required state for Ch{ch}: {required_state}")
+                    if required_state == 'nc' and current_state == 'True':
+                        logging.info(f"ℹ️ Please disable the push-pull output from {ch['Name']}")
+                        ready= False
+                    if required_state != 'nc' and current_state == 'False':
+                        logging.info(f"ℹ️ Please enable the push-pull output on {ch['Name']}")
+                        ready= False
+            except Exception as e:
+                logging.error(f"Error while checking the panel state: {e}")
                 ready= False
-            if required_state != 'nc' and current_state == 'False':
-                logging.info(f"ℹ️ Please enable the push-pull output on {ch['Name']}")
-                ready= False
-        sleep(1)
-    return r
+        sleep(SLOW_LOOP_TIME)
+    return range_index
 
 
 
@@ -122,14 +146,26 @@ def initialize_channels(init: dict, ser: serial.Serial) -> None:
             safe_write(ser, f"{ch['Name']} {ch['initvalue']}")
         else:
             safe_write(ser, f"{ch['Name']} 0")
+        
+        # Send the power limit if available
+        if 'max power' in ch.keys():
+            safe_write(ser, f"{ch['Name']} {ch['max power']}w")
+        else:
+            safe_write(ser, f"{ch['Name']} 1w")
 
 
 
 def safe_write(ser: serial.Serial, cmd: str) -> None:
-    logging.info(f"ℹ️ Sending to serial {cmd}")
-    ser.write(f"{cmd}\n".encode('utf-8'))
-    ser.flush()
-    sleep(0.1)  # small delay to ensure command is processed
+    if ser is not None:
+        try:
+            logging.info(f"ℹ️ Sending to serial {cmd}")
+            ser.write(f"{cmd}\n".encode('utf-8'))
+            ser.flush()
+        except Exception as e:
+            logging.error(f"Error while sending data to serial: {e}")
+    else:
+        logging.error(f"Cant send data to serial, port is not ready")
+    sleep(WRITE_DELAY)
 
 
 async def run_sweep(sweep: dict, ser: serial.Serial) -> bool:
@@ -153,77 +189,58 @@ async def run_sweep(sweep: dict, ser: serial.Serial) -> bool:
         if 'sweep' in sweep:
             await run_sweep(sweep['sweep'], ser)
     logging.info(f"✓ Completed sweep for channel {ch}")
-    await asyncio.sleep(1) # wait a bit before finishing to update the plot
     return True
 
 
-
-async def read_serial_values(ser: serial.Serial, rows: list, events: list, channels: list, loop_mode= True) -> None:
+def read_serial_values(ser: serial.Serial, events: list, channels: list)-> None:
     """
-    This function continuouly reads serial port incoming messages
-    If the message contains a row with datapoints, it parses and appends it to the dataset
+    This function reads serial port incoming messages
+    If the message contains a row with datapoints, it parses and appends it to each channel data buffers
     If a calib file is available, it will apply the corrections
     If the message contains something else than datapoints, it appends it to the events list
 
     Arguments:
         - Serial port connection
-        - Data rows list to be updated
         - Event list that to be updated
-        - List of offsets (one for each channel)
-        - List of current coeeficients (one for each channel)
+        - List of channels dictionnaries
     """
-    expected_tokens = 3 * len(channels) + 1
-    # timestamp for the beggining of the reading
-    start=-1
-    loop=True
-    while loop:
-        if not loop_mode:
-            loop= False
-        if ser.in_waiting > 0:
-            line = ser.readline().decode('utf-8').strip()
-            logging.debug(f"Received from Pico: {line}")
+    if ser.in_waiting > 0:
+        line = ser.readline().decode('utf-8').strip()
+        logging.debug(f"Received from Pico: {line}")
+        
+        # Parse the line into a dataframe
+        try:
+            parts = line.split(' ')
+            expected_tokens = 3 * len(channels) + 1
+            # If a line don't have the expected number of elements, then it's an event
+            if len(parts) != expected_tokens:
+                logging.debug(f"Recieved event {line}")
+                events.append(line)
             
-            # Parse the line into a dataframe
-            try:
-                # Use split with a bounded number of splits to avoid accidental extra tokens
-                parts = line.split(' ')
-                # Skip lines that don't have the expected number of elements
-                if len(parts) != expected_tokens:
-                    logging.debug(f"Recieved event {line}")
-                    events.append(line)
-                    continue
+            else:
+                # Get  the raspberry pico time from the first chunk
+                t= float(parts[0])
 
-                row = {}
-                # Set the start time based on the first timestamp received
-                if start < 0:
+                # Then, parse the channels
+                for n, ch in enumerate(channels):
+                    logging.debug(f"Parsing channel {ch['Name']}")
                     try:
-                        start = float(parts[0])
-                    except Exception:
-                        start = 0.0
-                try:
-                    row['t'] = float(parts[0]) - start
-                except Exception:
-                    row['t'] = parts[0]
-
-                for idx, ch in enumerate(channels):
-                    logging.debug("Parsing channel %s", idx)
-                    try:
-                        i = parts[3*idx + 2]
+                        i = parts[3*n + 2]
                         if i != 'None':
                             i= float(i)
                         else: # This happens when switching range
                             i = float('nan')
                     except Exception as e:
-                        logging.error(f"Error parsing current for channel {ch.get('Name', idx)}: {e}")
+                        logging.error(f"Error parsing current for channel {ch['Name']}: {e}")
                         i = float('nan')
                     try:
-                        v = parts[3*idx + 3]
+                        v = parts[3*n + 3]
                         if v != 'None':
                             v= float(v)
                         else: # not supposed to happen
                             v = float('nan')
                     except Exception as e:
-                        logging.error(f"Error parsing voltage for channel {ch.get('Name', idx)}: {e}")
+                        logging.error(f"Error parsing voltage for channel {ch['Name']}: {e}")
                         v = float('nan')
 
                     # Apply current offset corrections
@@ -236,15 +253,23 @@ async def read_serial_values(ser: serial.Serial, rows: list, events: list, chann
                     except Exception as e:
                         logging.error(f"✗ Error while correcting current values: {e}")
 
-                    row[f"i{ch['Name']}"] = i
-                    row[f"v{ch['Name']}"] = v
+                    ch['IData'].append(i)
+                    ch['VData'].append(v)
+                    ch['TData'].append(t)
 
-                rows.append(row)
+        except Exception as e:
+            logging.error(f"✗ Error parsing line: {e}")
+            logging.error(f"✗ Line content: {line}")
+                   
 
-            except Exception as e:
-                logging.error(f"✗ Error parsing line: {e}")
-                logging.error(f"✗ Line content: {line}")
-        await asyncio.sleep(1e-3)
+async def read_serial_loop(ser: serial.Serial, events: list, channels: list) -> None:
+    """
+    This function runs read_serial_values() function whtin an async loop
+    """
+    while True:
+        if ser is not None:
+            read_serial_values(ser, events, channels)
+        await asyncio.sleep(FAST_LOOP_TIME)
 
 
 def format_sweep_values(sweep: dict) -> None:

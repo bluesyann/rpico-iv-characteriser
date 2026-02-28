@@ -11,17 +11,17 @@ import logging
 OFFSETS_I_FILENAME= 'offsets_i_noload_range'
 COEFFS_I_FILENAME= 'coeffs_i'
 
-def load_calibration_files(r: int, channels: list, dir: Path):
+def load_calibration_files(range_index: int, channels: list, dir: Path)-> None:
     """Load calibration files for ammeter range r (0-4)"""
     
-    file= dir / f"{OFFSETS_I_FILENAME}{r}.dat"
-    logging.info(f"ℹ️ Trying to read offset file {file}...")
-    df=pd.DataFrame
+    calfile= dir / f"{OFFSETS_I_FILENAME}{range_index}.dat"
+    logging.info(f"ℹ️ Trying to read offset file {calfile}...")
+    df=pd.DataFrame()
     try:
-        df = pd.read_csv(file)
+        df = pd.read_csv(calfile)
         logging.info(f"✓ Loaded {len(df)} calibration points")
     except Exception as e:
-        logging.warning(f"⚠ No calibration available for range {r}: {e}")
+        logging.warning(f"⚠ No calibration available for range {range_index}: {e}")
     
     # Process channels if data loaded
     if not df.empty:
@@ -40,12 +40,12 @@ def load_calibration_files(r: int, channels: list, dir: Path):
                 logging.warning(f"Column {v} or {i} are missing from I offsets table")
 
 
-    logging.info(f"ℹ️ Getting Ammeters coeficients for range {r}...")
+    logging.info(f"ℹ️ Getting Ammeters coeficients for range {range_index}...")
     try:
         #Get the apropriate file
         for f in dir.iterdir():
             if f.name.startswith(COEFFS_I_FILENAME) \
-                and f.name.endswith(f"range{r}.dat"):
+                and f.name.endswith(f"range{range_index}.dat"):
                 # Get the resistor value from the filename _R1k_range
                 R= f.name.split('_')[2][1:-1]
                 logging.info(f"✓ Found a file for R={R} kOmhs ({f.name})")
@@ -56,7 +56,8 @@ def load_calibration_files(r: int, channels: list, dir: Path):
                 if not df.empty:
                     calculate_ammeter_coefs(df, float(R), channels, 'va')
     except Exception as e:
-        logging.warning(f"⚠ Cannot set a current coefficient for range {r}: {e}")
+        logging.warning(f"⚠ Cannot set a current coefficient for range {range_index}: {e}")
+
 
 def calculate_ammeter_coefs(df: pd.DataFrame, R: float, channels: list, chvref: str):
     """
@@ -99,7 +100,7 @@ def resample_xy(df: pd.DataFrame, x: str, y: str, n: int, sigma: int):
         - Resampled df
     """
     df= df[[x,y]] #Ensure the df has only two columns
-    df = df.sort_values(x).drop_duplicates(x)
+    df = df.sort_values(x).drop_duplicates(subset=[x])
     df[y] = gaussian_filter1d(df[y].values, sigma=sigma)
     
     # Define new regular x grid (100 points over your range of interest)

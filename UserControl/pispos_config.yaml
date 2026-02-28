@@ -1,0 +1,21 @@
+setup:
+    channels: [a,b,c]
+    device: /dev/ttyACM*
+    calibration folder: /media/Bureau/Electronique/iv_calibrations
+    setpoint: 0
+    unit: v
+    max power: 1
+gui:
+    sizex: 1000
+    sizey: 930
+    name: Multi-Channel Power Supply
+    foreground channels colors:
+        a: '#1014ff'
+        b: '#e01616'
+        c: '#006100'
+    background channels colors:
+        a: '#b8b8ce'
+        b: '#bba3a3'
+        c: '#abbeab'
+    sampling frequency: 10
+    chart duration: 30

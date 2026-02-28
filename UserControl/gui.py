@@ -2,22 +2,40 @@ import tkinter as tk
 from tkinter import ttk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-import time
 from pathlib import Path
 import serial_functions as serfn
 import calib_functions as calfn
-import asyncio
 
 import logging
 level = logging.INFO
 logging.basicConfig(level=level, format='%(asctime)s - %(levelname)s - %(message)s')
 
+import yaml
+
+def read_yaml(filepath: Path)-> dict:
+    try:
+        logging.info(f"ℹ️ Parsing yaml file at: {filepath}")
+        with open(filepath, 'r') as f:
+            loaded = yaml.safe_load(f)
+            if isinstance(loaded, dict):
+                config = loaded
+                return config
+            else:
+                return None
+    except Exception as e:
+        logging.error(f"✗ Error opening file: {e}")
+        return None
+
+# Load configuration file
+yamlpath= Path('pispos_config.yaml')
+config= None
+
 
 class RealTimeGUI:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Multi-Channel Current Source PID Monitor")
-        self.root.geometry("1400x930")
+        self.root.title(config['gui']['name'])
+        self.root.geometry(f"{config['gui']['sizex']}x{config['gui']['sizey']}")
         
         # Serial connection
         self.ser = None
@@ -25,22 +43,26 @@ class RealTimeGUI:
         self.connection_status = None
 
         # Board state
+        self.events= [] # Buffer to store events coming from the board
         self.range= None
-        self.loaded_calib= None
+        self.sampling_freq= config['gui']['sampling frequency']
+        self.graph_duration= config['gui']['chart duration']
 
         # Channel definitions
-        self.channel_names = ['a', 'b', 'c']
-        fg_channel_colors = {'a': "#1014ff", 'b': "#e01616", 'c': "#006100"}
-        bg_channel_colors = {'a': "#b8b8ce", 'b': "#bba3a3", 'c': "#ABBEAB"}
+        self.calibpath= Path(config['setup']['calibration folder'])
+        self.channel_names = config['setup']['channels']
+        fg_channel_colors = config['gui']['foreground channels colors']
+        bg_channel_colors = config['gui']['background channels colors']
         self.channels=[]
         for name in self.channel_names:
             ch={
                 'Name': name,
-                'VData': [], # Array to store voltage time serie 
-                'IData': [], # Array to store current time serie
-                'SetPoint': 0.0, # Setpoint of the channel
-                'Unit': 'V', # Unit of this setpoint (V or I for voltage or current regulation)
-                'MaxPower': 1.0, # Maximum power before disconnecting the channel
+                'VData': [], # Array to store voltage serie 
+                'IData': [], # Array to store current serie
+                'TData': [], # Array to store time serie
+                'SetPoint': config['setup']['setpoint'], # Setpoint of the channel
+                'Unit': config['setup']['unit'], # Unit of this setpoint (V or I for voltage or current regulation)
+                'MaxPower': config['setup']['max power'], # Maximum power before disconnecting the channel
 
                 'ioffset': None,
                 'icoef': 1,
@@ -56,14 +78,11 @@ class RealTimeGUI:
             }
             self.channels.append(ch)
         
-        # Data buffers
-        self.time_data = []
-        self.rows= [] # Buffer to store serial data
-        self.events= [] # Buffer to store events coming from the board
-        self.sampling_freq= 10
-        self.graph_duration= 30
-        
         self.setup_layout()
+        # Running flag used to stop recurring callbacks on shutdown
+        self._running = True
+        # Bind window close (top-right cross) to graceful shutdown handler
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         
     def setup_layout(self)-> None:
@@ -183,7 +202,7 @@ class RealTimeGUI:
         ch['MaxPowerEntry'].pack(side=tk.LEFT, padx=(0, 3))
         tk.Label(entry_frame, text="W", bg=ch['BgColor'], font=("Arial", 11)).pack(side=tk.LEFT)
         
-        # Update button (conter)
+        # Update button (center)
         update_btn = tk.Button(ch_frame, text="Update", command=lambda c=ch: self.update_channel(c),
                             bg="#e0e0e0", fg="Black", font=("Arial", 10, "bold"), width=8)
         update_btn.pack(fill=tk.X, pady=(5, 0))
@@ -230,36 +249,8 @@ class RealTimeGUI:
             serfn.safe_write(self.ser, cmd)
             
         except ValueError:
-            print(f"Invalid values for Channel {ch['Name']}")
+            logging.error(f"Invalid values for Channel {ch['Name']}")
 
-
-    def update_data(self)-> None:
-        t = time.time()
-        #logging.info(f"Updating data lists, time {t}...")
-        for row in self.rows:
-            logging.debug(f"Appending new row to the graph data {row}")
-            self.time_data.append(t)
-            # each row is a dict with keys such as ia, va, ib, vb..
-            try:
-                for param in row.keys(): # param has two char, i/v and channel name
-                    if param[0]=='t':
-                        continue
-                    if len(param)==2:
-                        n= self.channel_names.index(param[1])
-                        if param[0]=='i':
-                            self.channels[n]['IData'].append(row[param])
-                        elif param[0]=='v':
-                            self.channels[n]['VData'].append(row[param])
-                        else:
-                            print(f"Unknown key while reading serial data: {param}")
-                    else:
-                        print(f"Unknown key while reading serial data: {param}")
-            except Exception as e:
-                print(f"Cannot parse {row}: {e}")
-        self.rows.clear()
-        
-        self.root.after(int(1000/self.sampling_freq), self.update_data)
-                        
 
     def update_events(self)-> None:
         """
@@ -281,6 +272,11 @@ class RealTimeGUI:
             elif 'Range' in event and len(ep)==3:
                 try:
                     self.range= int(ep[1])
+                    # Update the calibrations for the new range
+                    try:
+                        calfn.load_calibration_files(self.range, self.channels, self.calibpath)
+                    except Exception as e:
+                        logging.error(f"Error getting the calibration for range {self.range}: {e}")
                 except Exception as e:
                     logging.error(f"Error parsing range: {e}")
             elif 'State' in event and len(ep)>=3:
@@ -303,59 +299,94 @@ class RealTimeGUI:
 
 
         self.events.clear()
-        self.root.after(100, self.update_events)
+        if self._running:
+            self.root.after(100, self.update_events)
 
 
     def update_plot(self)-> None:
-        # Update the sampling frequency if is it has been changed
-        f= float(self.sampling_var.get())
-        if f != self.sampling_freq:
-            if f >= 1 and f <= 100:
-                print(f"Updating sampling frequency from {self.sampling_freq} to {f} Hz")
-                serfn.safe_write(self.ser, f"set sampling {f}")
-                self.sampling_freq= f
-        
-        # Update the graph duration if it has been changed
-        d= float(self.time_var.get())
-        if d != self.graph_duration:
-            if d >= 5 and d <= 1000:
-                print(f"Updating graph duration from {self.graph_duration} to {d} s")
-                self.graph_duration= d
-        
-        # Remove oldest points from the dataset
-        max_points= int(self.graph_duration*self.sampling_freq)
-        logging.debug(f"Current points {len(self.time_data)} - Max points {max_points}")
-        if len(self.time_data) > max_points:
+        try:
+            # Update the sampling frequency from the GUI if is it has changed
+            f= float(self.sampling_var.get())
+            if f != self.sampling_freq:
+                if f >= 1 and f <= 20:
+                    logging.info(f"Updating sampling frequency from {self.sampling_freq} to {f} Hz")
+                    serfn.safe_write(self.ser, f"set sampling {f}")
+                    self.sampling_freq= f
+            
+            # Update the graph duration from the GUI if it has changed
+            d= float(self.time_var.get())
+            if d != self.graph_duration:
+                if d >= 5 and d <= 1000:
+                    logging.info(f"Updating graph duration from {self.graph_duration} to {d} s")
+                    self.graph_duration= d
+            
+            # Remove oldest points from the dataset
+            max_points= int(self.graph_duration*self.sampling_freq)
             logging.debug("Removing oldest points")
-            self.time_data= self.time_data[-max_points:]
             for ch in self.channels:
-                ch['VData']= ch['VData'][-max_points:]
-                ch['IData']= ch['IData'][-max_points:]
-        
-        # Update the plots
-        if self.time_data:
-            # Prepare x axis to have 0 on the right and negative relative time on the left
-            relative_time = [x - self.time_data[-1] for x in self.time_data]
+                if len(ch['VData']) > max_points:
+                    ch['VData']= ch['VData'][-max_points:]
+                if len(ch['IData']) > max_points:
+                    ch['IData']= ch['IData'][-max_points:]
+                if len(ch['TData']) > max_points:
+                    ch['TData']= ch['TData'][-max_points:]
+            
+            # Update the plots
             for ch in self.channels:
-                self.voltage_lines[ch['Name']].set_data(relative_time, ch['VData'])
+                # Prepare x axis to have 0 on the right and negative relative time on the left
+                if len(ch['TData']) > 0:
+                    t_relative = [x - ch['TData'][-1] for x in ch['TData']]
+                    self.voltage_lines[ch['Name']].set_data(t_relative, ch['VData'])
+                    self.current_lines[ch['Name']].set_data(t_relative, ch['IData'])
+            
+            # Set voltage plot style
             self.ax_voltage.relim()
             self.ax_voltage.autoscale_view()
             self.ax_voltage.set_xlim(-self.graph_duration, 0)
             
-            for ch in self.channels:
-                self.current_lines[ch['Name']].set_data(relative_time, ch['IData'])
+            # Set current plot style
             self.ax_current.relim()
             self.ax_current.autoscale_view()
             self.ax_current.set_xlim(-self.graph_duration, 0)
-            
-        self.canvas.draw()
-        self.root.after(int(1000/self.sampling_freq), self.update_plot)
+                
+            self.canvas.draw()
+        except Exception as e:
+            logging.error(f"Error while updating the charts: {e}")
+        
+        if self._running:
+            self.root.after(int(1000/self.sampling_freq), self.update_plot)
 
 
     def read_serial(self):
-        if self.ser is not None:
-            asyncio.run(serfn.read_serial_values(self.ser, self.rows, self.events, self.channels, loop_mode=False))
-        self.root.after(1, self.read_serial)
+        if not self._running:
+            return
+        if self.ser is None:
+            logging.debug("Serial connection not set")
+            if self._running:
+                self.root.after(1000, self.read_serial)
+        else:
+            try:
+                serfn.read_serial_values(self.ser, self.events, self.channels)
+            except Exception as e:
+                logging.error(f"Error while reading serial: {e}")
+            if self._running:
+                self.root.after(1, self.read_serial)
+
+
+    def on_close(self) -> None:
+        """Gracefully stop recurring callbacks, close serial port and destroy the Tk window."""
+        logging.info("Shutting down GUI gracefully...")
+        # Prevent further callbacks
+        self._running = False
+        # Try to close serial port if open
+        try:
+            serfn.close_serial_link(self.ser)
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
 
     def get_user_panel(self)-> None:
@@ -372,9 +403,9 @@ class RealTimeGUI:
                 # Set the ammeter range and load the calibration
                 self.range= int(config['AmmeterRange'])
                 try:
-                    calfn.load_calibration_files(self.range, self.channels, Path('/media/Bureau/Electronique/iv_calibrations'))
+                    calfn.load_calibration_files(self.range, self.channels, self.calibpath)
                 except Exception as e:
-                    print(f"Error getting the calibration for range {self.range}: {e}")
+                    logging.error(f"Error getting the calibration for range {self.range}: {e}")
                 for ch in self.channels:
                     logging.debug(f"Checking channel {ch['Name']} state: switch on {config[f"{ch['Name']}_PushPullConnected"]}")
                     if config[f"{ch['Name']}_PushPullConnected"]=='True':
@@ -413,7 +444,7 @@ class RealTimeGUI:
         
         tk.Label(device_frame, text="Device:", font=("Arial", 11, "bold")).pack(anchor=tk.W)
         import glob
-        self.device_ports = [p for p in glob.glob('/dev/ttyACM0*') 
+        self.device_ports = [p for p in glob.glob(config['setup']['device']) 
                             if 'Bluetooth' not in p]
         self.device_ports = self.device_ports or ["No device found"]
         
@@ -477,25 +508,31 @@ class RealTimeGUI:
                 self.connection_status.config(text=f"No reply from {port}", fg="red")
             else:
                 self.connection_status.config(text=f"Connected: {port} @ {baud}", fg="green")
-                print(f"Connected to {port} @ {baud}")
+                logging.info(f"Connected to {port} @ {baud}")
 
                 # Set the sampling frequency to 10 Hz
-                serfn.safe_write(self.ser, 'set sampling 10')
+                serfn.safe_write(self.ser, f"set sampling {self.sampling_freq}")
             
         except Exception as e:
             self.connection_status.config(text=f"Connection failed: {str(e)}", fg="red")
-            print(f"Connection error: {e}")
+            logging.error(f"Connection error: {e}")
             self.ser= None
 
 
     def run(self):
         self.read_serial()
-        self.update_data()
         self.update_events()
         self.update_ivp_monitor()
         self.update_plot()
         self.root.mainloop()
 
 if __name__ == "__main__":
-    app = RealTimeGUI()
-    app.run()
+    try:
+        config = read_yaml(yamlpath)
+        if config is not None:
+            app = RealTimeGUI()
+            app.run()
+        else:
+            logging.error(f"Cant open configuration yaml file {yamlpath}")
+    except Exception as e:
+        logging.error(f"Error while opening {yamlpath}: {e}")
