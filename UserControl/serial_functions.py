@@ -6,31 +6,14 @@ from time import sleep
 import logging
 # ✓ ✗ ⚠ ℹ️ ⏳
 
-channels=[
-    {
-        'name': 'a',
-        'ioffset': None,
-        'icoef': 1
-    },
-    {
-        'name': 'b',
-        'ioffset': None,
-        'icoef': 1
-    },
-    {
-        'name': 'c',
-        'ioffset': None,
-        'icoef': 1
-    }
-]
 
 STANDBY={
     'voffset': 0,
     'sampling': 1,
     'channels':[
-        {'name': 'a','control': 'v', 'initvalue': 0},
-        {'name': 'b','control': 'v', 'initvalue': 0},
-        {'name': 'c','control': 'v', 'initvalue': 0}
+        {'Name': 'a','control': 'v', 'initvalue': 0},
+        {'Name': 'b','control': 'v', 'initvalue': 0},
+        {'Name': 'c','control': 'v', 'initvalue': 0}
     ]
 }
 
@@ -106,13 +89,13 @@ def wait_until_panel_ready(ser: serial.Serial, init: dict) -> int:
             ready= False
         for ch in init['channels']:
             required_state= ch['control']
-            current_state= board_state[f"{ch['name']}_PushPullConnected"]
+            current_state= board_state[f"{ch['Name']}_PushPullConnected"]
             logging.debug(f"Required state for Ch{ch}: {required_state}")
             if required_state == 'nc' and current_state == 'True':
-                logging.info(f"ℹ️ Please disable the push-pull output from {ch['name']}")
+                logging.info(f"ℹ️ Please disable the push-pull output from {ch['Name']}")
                 ready= False
             if required_state != 'nc' and current_state == 'False':
-                logging.info(f"ℹ️ Please enable the push-pull output on {ch['name']}")
+                logging.info(f"ℹ️ Please enable the push-pull output on {ch['Name']}")
                 ready= False
         sleep(1)
     return r
@@ -132,13 +115,13 @@ def initialize_channels(init: dict, ser: serial.Serial) -> None:
     #Initialize channels
     for ch in init['channels']:
         # Send the regulation mode (voltage / current)
-        safe_write(ser, f"{ch['name']} {ch['control']}")
+        safe_write(ser, f"{ch['Name']} {ch['control']}")
         
         # Send the initial setpoint value
         if 'initvalue' in ch.keys():
-            safe_write(ser, f"{ch['name']} {ch['initvalue']}")
+            safe_write(ser, f"{ch['Name']} {ch['initvalue']}")
         else:
-            safe_write(ser, f"{ch['name']} 0")
+            safe_write(ser, f"{ch['Name']} 0")
 
 
 
@@ -231,7 +214,7 @@ async def read_serial_values(ser: serial.Serial, rows: list, events: list, chann
                         else: # This happens when switching range
                             i = float('nan')
                     except Exception as e:
-                        logging.error(f"Error parsing current for channel {ch.get('name', idx)}: {e}")
+                        logging.error(f"Error parsing current for channel {ch.get('Name', idx)}: {e}")
                         i = float('nan')
                     try:
                         v = parts[3*idx + 3]
@@ -240,7 +223,7 @@ async def read_serial_values(ser: serial.Serial, rows: list, events: list, chann
                         else: # not supposed to happen
                             v = float('nan')
                     except Exception as e:
-                        logging.error(f"Error parsing voltage for channel {ch.get('name', idx)}: {e}")
+                        logging.error(f"Error parsing voltage for channel {ch.get('Name', idx)}: {e}")
                         v = float('nan')
 
                     # Apply current offset corrections
@@ -253,8 +236,8 @@ async def read_serial_values(ser: serial.Serial, rows: list, events: list, chann
                     except Exception as e:
                         logging.error(f"✗ Error while correcting current values: {e}")
 
-                    row[f"i{ch['name']}"] = i
-                    row[f"v{ch['name']}"] = v
+                    row[f"i{ch['Name']}"] = i
+                    row[f"v{ch['Name']}"] = v
 
                 rows.append(row)
 

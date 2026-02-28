@@ -28,7 +28,7 @@ def load_calibration_files(r: int, channels: list, dir: Path):
         cols= df.columns.to_list()
         logging.debug(f"dataframe columns: {cols}")
         for ch in channels:
-            n= ch['name']
+            n= ch['Name']
             i, v = f"i{n}", f"v{n}"
             if v in cols and i in cols:
                 logging.info(f"ℹ️ Loading current offsets for channel {n}")
@@ -74,7 +74,7 @@ def calculate_ammeter_coefs(df: pd.DataFrame, R: float, channels: list, chvref: 
     """
     for ch in channels:
         try:
-            n= ch['name']
+            n= ch['Name']
             if chvref in df.columns and f"i{n}" in df.columns:
                 result = linregress(df[chvref], df[f"i{n}"])
                 logging.debug(f"Channel {n}: y = {result.slope:.4f}x + {result.intercept:.4f} (R² = {result.rvalue**2:.4f})")
